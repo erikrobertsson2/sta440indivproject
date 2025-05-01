@@ -1,0 +1,232 @@
+---
+title: "indivprojworkbook"
+author: "Erik Robertsson"
+date: "2025-04-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+install.packages("car", dependencies = TRUE)
+```
+
+
+
+```{r}
+library(tidyverse)
+library(broom)
+library(dplyr)
+library(car)
+library(ggplot2)
+library(forcats)
+library(knitr)
+```
+
+
+```{r}
+orignaldataset <- read_csv("AB_NYC_2019.csv")
+
+glimpse(orignaldataset)
+summary(orignaldataset)
+
+filtereddataset <- orignaldataset |>
+  filter(price > 0)
+
+filtereddataset |>
+  summarise(
+    n      = n(),
+    mean   = mean(price, na.rm = TRUE),
+    median = median(price, na.rm = TRUE),
+    sd     = sd(price, na.rm = TRUE),
+    min    = min(price, na.rm = TRUE),
+    p25    = quantile(price, 0.25, na.rm = TRUE),
+    p75    = quantile(price, 0.75, na.rm = TRUE),
+    max    = max(price, na.rm = TRUE)
+  ) |>
+  print()
+
+# Histogram of price (log‐scale x axis)
+ggplot(filtereddataset, aes(x = price)) +
+  geom_histogram(binwidth = 25, fill = "steelblue", color = "white") +
+  scale_x_log10() +
+  labs(
+    title = "Distribution of Nightly Price (log scale)",
+    x     = "Price (USD, log10)",
+    y     = "Count"
+  ) +
+  theme_minimal()
+
+# Boxplot of price by room type
+ggplot(filtereddataset, aes(x = room_type, y = price)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_y_log10() +
+  labs(
+    title = "Price by Room Type",
+    x     = "Room Type",
+    y     = "Price (USD, log10)"
+  ) +
+  theme_minimal()
+
+# Boxplot of price by neighbourhood group (borough)
+ggplot(filtereddataset, aes(x = neighbourhood_group, y = price)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  scale_y_log10() +
+  labs(
+    title = "Price by Borough",
+    x     = "Neighbourhood Group",
+    y     = "Price (USD, log10)"
+  ) +
+  theme_minimal()
+
+# Scatterplot: price vs. number of reviews
+ggplot(filtereddataset, aes(x = number_of_reviews, y = price)) +
+  geom_point(alpha = 0.3) +
+  scale_y_log10() +
+  labs(
+    title = "Price vs. Number of Reviews",
+    x     = "Number of Reviews",
+    y     = "Price (USD, log10)"
+  ) +
+  theme_minimal()
+
+# Summary table of mean & median price by borough and room type
+filtereddataset |>
+  group_by(neighbourhood_group, room_type) |>
+  summarise(
+    count        = n(),
+    mean_price   = mean(price, na.rm = TRUE),
+    median_price = median(price, na.rm = TRUE)
+  ) |>
+  arrange(neighbourhood_group, room_type) |>
+  print(n = Inf)
+```
+
+
+
+```{r}
+filtereddataset <- filtereddataset |>
+  mutate(
+    log_price          = log(price),
+    log_reviews        = log1p(number_of_reviews),
+    reviews_per_month  = replace_na(reviews_per_month, 0),
+    log_min_nights     = log1p(minimum_nights)
+  )
+
+model <- lm(
+  log_price ~ room_type
+            + neighbourhood_group
+            + log_reviews
+            + reviews_per_month
+            + log_min_nights
+            + availability_365
+            + calculated_host_listings_count,
+  data = filtereddataset
+)
+
+summary(model)
+confint(model)
+
+tidy(model, conf.int = TRUE) |>
+  select(term, estimate, std.error, conf.low, conf.high, p.value)
+
+vif(model)
+
+par(mfrow = c(2,2))
+plot(model)
+par(mfrow = c(1,1))
+
+plot(model, which = 5)
+```
+
+
+```{r}
+tidy_mod <- tidy(model, conf.int = TRUE) |>
+  mutate(
+    term_label = case_when(
+      term == "(Intercept)"                       ~ "Intercept",
+      term == "room_typePrivate room"             ~ "Private vs Entire",
+      term == "room_typeShared room"              ~ "Shared vs Entire",
+      term == "neighbourhood_groupBrooklyn"       ~ "Brooklyn vs Bronx",
+      term == "neighbourhood_groupManhattan"      ~ "Manhattan vs Bronx",
+      term == "neighbourhood_groupQueens"         ~ "Queens vs Bronx",
+      term == "neighbourhood_groupStaten Island"  ~ "Staten Island vs Bronx",
+      term == "log_reviews"                       ~ "log1p(# Reviews)",
+      term == "reviews_per_month"                 ~ "Reviews per Month",
+      term == "log_min_nights"                    ~ "log1p(Min Nights)",
+      term == "availability_365"                  ~ "Availability (365)",
+      term == "calculated_host_listings_count"    ~ "Host Listings Count",
+      TRUE                                        ~ term
+    ),
+    est_exp  = exp(estimate),
+    low_exp  = exp(conf.low),
+    high_exp = exp(conf.high)
+  ) |>
+  arrange(term_label)
+
+tidy_mod |>
+  select(
+    Term      = term_label,
+    `Exp(β)`  = est_exp,
+    `2.5%`    = low_exp,
+    `97.5%`   = high_exp,
+    `Std.Err` = std.error,
+    `p-value` = p.value
+  ) |>
+  kable(digits = 3)
+
+key_terms <- c(
+  "Private vs Entire", "Shared vs Entire",
+  "Brooklyn vs Bronx", "Manhattan vs Bronx", "Queens vs Bronx"
+)
+
+plot_df <- filter(tidy_mod, term_label %in% key_terms)
+
+ggplot(plot_df, aes(x = fct_reorder(term_label, est_exp), y = est_exp)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = low_exp, ymax = high_exp), width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Multiplicative Effects on Nightly Price",
+    x     = "Coefficient (vs reference)",
+    y     = "Exp(Estimate) (Multiplicative Change)"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+ordered_terms <- c(
+  "Shared vs Entire",
+  "Private vs Entire",
+  "Brooklyn vs Bronx",
+  "Queens vs Bronx",
+  "Manhattan vs Bronx"
+)
+
+tidy_mod |>
+  filter(term_label %in% ordered_terms) |>
+  mutate(
+    Exp      = round(est_exp,  3),
+    `2.5%`   = round(low_exp,  3),
+    `97.5%`  = round(high_exp, 3),
+    `Std.Err`= round(std.error,3),
+    `p-value`= ifelse(p.value < 0.001, "<0.001", as.character(round(p.value,3)))
+  ) |>
+  select(
+    Term     = term_label,
+    `Exp(β)` = Exp,
+    `2.5%`   = `2.5%`,
+    `97.5%`  = `97.5%`,
+    `Std.Err`,
+    `p-value`
+  ) |>
+  arrange(factor(Term, levels = ordered_terms)) |>
+  kable(
+    caption = "Table 1. Multiplicative Effects on Nightly Price (Exp(β)) with 95% Confidence Intervals",
+    digits = 3
+  )
+```
